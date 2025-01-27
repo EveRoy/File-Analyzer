@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Name: Eva Gagloyev, Code: S16, Class Code: TMagen773632, Lecturer's Name: Erel Regev
 
 HOME=$(pwd)                                                                        # Sets the working directory to the current path.
 mkdir $HOME/forensic_case                                                          # Creates a directory for the forensic analysis.
