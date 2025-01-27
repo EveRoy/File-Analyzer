@@ -49,7 +49,10 @@ forensic_case/
 ### Usage
 1. Run the script as **root** to ensure necessary permissions:
    ```bash
-   sudo ./forensic_script.sh
+   sudo bash ./FileAnalyzer.sh
+   or
+   sudo su root
+   bash ./FileAnalyzer.sh
    ```
 
 2. When prompted, provide the full path to the file to be analyzed:
