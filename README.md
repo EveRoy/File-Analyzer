@@ -103,4 +103,4 @@ forensic_case/
 
 ### Pay ATTANTION
 - Ensure the script is run in an environment with sufficient storage, as extracted files and logs can be large.
-- The script assumes the Volatility binary is located at `$HOME/vol/vol`. Soon a vol tool will be easily uploaded with a change to the script. 
+- The script assumes the Volatility is located at `$HOME/vol/vol`. therefore run the script from the directory it created for you (File-Analyzer). 
