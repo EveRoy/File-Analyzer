@@ -116,8 +116,6 @@ function INSTALL() {
 	echo "------ Starting INSTALL at $(date) ------" >> "$LOG_FILE"
 
 	# Downloads and extracts necessary tools if not already installed.
-	wget -P $HOME https://file.io/scKNqiStpCuZ > /dev/null 2>&1
-	unzip $HOME/scKNqiStpCuZ  -d $HOME
 	
 	tools=("binwalk" "bulk_extractor" "foremost")
 	for tool in "${tools[@]}"; do
