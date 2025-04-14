@@ -1,166 +1,171 @@
 #!/bin/bash
 
+set -e  # Exit on error
 
-HOME=$(pwd)                                                                        # Sets the working directory to the current path.
-mkdir $HOME/forensic_case                                                          # Creates a directory for the forensic analysis.
-LOG_FILE="$HOME/forensic_case/script_log.txt"                                      # Defines the log file location.
+# === Colors ===
+RED='\e[31m'
+GREEN='\e[32m'
+BLUE='\e[34m'
+YELLOW='\e[33m'
+NC='\e[0m'  # No color
 
-echo "Logging started at $(date)" | tee -a "$LOG_FILE"                             # Logs the start time.
+#Check if the script is run as root for proper permissions.
+if [[ "$EUID" -ne 0 ]]; then
+    echo -e "${RED}[✘] Please run this script as root.${NC}"
+    exit 1
+fi
+
+#Users path for memory file
+read -rp "Enter full path to the memory/disk image file: " file
+
+if [[ ! -f "$file" ]]; then
+    echo -e "${RED}[✘] File not found: $file${NC}"
+    exit 1
+fi
+
+# PATHS
+HOME_DIR=$(dirname "$file")
+CASE_DIR="$HOME_DIR/forensic_case"
+VOL_PATH="$HOME_DIR/vol/vol"
+LOG_FILE="$CASE_DIR/script_log.txt"
+
+
+echo -e "${BLUE}==========================================="
+echo -e "🔍 Project Analyzer v1.0"
+echo -e "Automated Memory Forensics Script"
+echo -e "===========================================${NC}"
+mkdir -p "$CASE_DIR"
+echo -e "\n${BLUE}[INFO] Logging started at $(date)${NC}" | tee -a "$LOG_FILE"
+
 
 function VOLATILITY() {
-	echo "------ Starting VOLATILITY at $(date) ------" | tee -a "$LOG_FILE"        # Logs the start time of the VOLATILITY function.
+    echo -e "\n${BLUE}===== Volatility Analysis =====${NC}"
 
-	# Checks if Volatility can analyze the file.
-	vol_banner=$($HOME/vol/vol -f "$file" imageinfo 2>&1)
-	if echo "$vol_banner" | grep -q "Suggested Profile(s): No suggestion"; then
-		echo "[+] File cannot be analyzed with Volatility." | tee -a "$LOG_FILE"
-	else
-		echo "[+] File can be analyzed with Volatility." | tee -a "$LOG_FILE"
+    if [[ ! -x "$VOL_PATH" ]]; then
+        echo -e "${YELLOW}[!] Volatility is not executable. Fixing...${NC}"
+        chmod +x "$VOL_PATH"
+    fi
+# Checks if Volatility can analyze the file.
+    vol_banner=$("$VOL_PATH" -f "$file" imageinfo 2>&1)
+    if echo "$vol_banner" | grep -q "Suggested Profile(s): No suggestion"; then
+        echo -e "${YELLOW}[!] No suggested profile found. Skipping Volatility.${NC}" | tee -a "$LOG_FILE"
+        return
+    fi
 
-		# Sets the profile based on Volatility's suggested profile.
-		PROFILE=$($HOME/vol/vol -f $file imageinfo | grep Suggested | awk '{print $4}' | awk -F ',' '{print $1}')
-		echo "---The found profile: $PROFILE "
+    PROFILE=$("$VOL_PATH" -f "$file" imageinfo | grep Suggested | awk '{print $4}' | cut -d',' -f1)
+    echo -e "${GREEN}[✔] Using profile: $PROFILE${NC}" | tee -a "$LOG_FILE"                            # Sets the profile based on Volatility's suggested profile.
+    mkdir -p "$CASE_DIR/volatility"
 
-		# Runs various Volatility commands and saves output.
-		echo "[+] Getting processes list from the memory:" | tee -a "$LOG_FILE"
-		$HOME/vol/vol -f $file --profile=$PROFILE pslist | tee -a "$HOME/forensic_case/volatility/processes.txt"
+    "$VOL_PATH" -f "$file" --profile="$PROFILE" pslist | tee "$CASE_DIR/volatility/processes.txt"      # Runs various Volatility commands and saves output.
+    "$VOL_PATH" -f "$file" --profile="$PROFILE" connscan | tee "$CASE_DIR/volatility/connections_scan.txt"
+    "$VOL_PATH" -f "$file" --profile="$PROFILE" hivelist | tee "$CASE_DIR/volatility/hives.txt"
+# Dumps registry information and logs success or failure.
+    "$VOL_PATH" -f "$file" --profile="$PROFILE" dumpregistry --dump-dir "$CASE_DIR" \
+        | tee "$CASE_DIR/dumpregistry_output.txt"
+    if [[ $? -ne 0 ]]; then
+        echo -e "${YELLOW}[!] dumpregistry failed. Continuing.${NC}" | tee -a "$LOG_FILE"
+    fi
+# Extracts specific registry keys for usernames and executables.
+    "$VOL_PATH" -f "$file" --profile="$PROFILE" printkey -K "SAM\\Domains\\Account\\Users\\Names" \
+        | tee "$CASE_DIR/volatility/SAM_usernames.txt"
+    "$VOL_PATH" -f "$file" --profile="$PROFILE" printkey -K "Software\\Microsoft\\Windows\\CurrentVersion\\Run" \
+        | tee "$CASE_DIR/volatility/executables_names.txt"
 
-		echo "[+] Getting information related to network connections.." | tee -a "$LOG_FILE"
-		$HOME/vol/vol -f $file --profile=$PROFILE connscan | tee -a "$HOME/forensic_case/volatility/connections_scan.txt"
+    echo -e "${GREEN}[✔] Volatility analysis complete.${NC}" | tee -a "$LOG_FILE"
 
-		echo "[+] Making an attempt to provide hive list:" | tee -a "$LOG_FILE"
-		$HOME/vol/vol -f $file --profile=$PROFILE hivelist | tee -a "$HOME/forensic_case/volatility/hives.txt"
+    echo -e "\n${BLUE}===== File Extraction Summary =====${NC}"
 
-		# Dumps registry information and logs success or failure.
-		$HOME/vol/vol -f $file --profile=$PROFILE dumpregistry --dump-dir $HOME/forensic_case | tee -a "$HOME/forensic_case/dumpregistry_output.txt"
-		if [ "$?" == "1" ]; then
-			echo "Couldn't extract hive list.." | tee -a "$LOG_FILE"
-			exit
-		else
-			# Extracts specific registry keys for usernames and executables.
-			echo "[+] Attempting to extract usernames from the SAM file:" | tee -a "$LOG_FILE"
-			$HOME/vol/vol -f $file --profile=$PROFILE printkey -K "SAM\\Domains\\Account\\Users\\Names" | tee -a "$HOME/forensic_case/volatility/SAM_usernames.txt"
+# Counts extracted files in different directories for summary logging.
+    path1=$(ls -la "$CASE_DIR/binwalk" 2>/dev/null | wc -l)
+    path2=$(ls -la "$CASE_DIR/bulk_extractor" 2>/dev/null | wc -l)
+    path3=$(ls -la "$CASE_DIR/bulk_extractor/"*/ 2>/dev/null | wc -l)
+    path4=$(ls -la "$CASE_DIR/bulk_extractor/"*/*/ 2>/dev/null | wc -l)
+    path5=$(ls -la "$CASE_DIR/foremost" 2>/dev/null | wc -l)
+    path6=$(ls -la "$CASE_DIR/foremost/"*/ 2>/dev/null | wc -l)
+    path7=$(ls -la "$CASE_DIR/strings" 2>/dev/null | wc -l)
+    path8=$(ls -la "$CASE_DIR/volatility" 2>/dev/null | wc -l)
+    path9=$(ls -la "$CASE_DIR" 2>/dev/null | wc -l)
 
-			echo "[+] Attempting to find executables names from the SYSTEM file:" | tee -a "$LOG_FILE"
-			$HOME/vol/vol -f $file --profile=$PROFILE printkey -K "Software\\Microsoft\\Windows\\CurrentVersion\\Run" | tee -a "$HOME/forensic_case/volatility/executables_names.txt"
-		fi
-	fi
-
-	echo "------ Finished VOLATILITY at $(date) ------" >> "$LOG_FILE"
-
-	# Counts extracted files in different directories for summary logging.
-	path1=$(ls -la /home/kali/Desktop/forensic_case/binwalk | wc -l)
-	path2=$(ls -la /home/kali/Desktop/forensic_case/bulk_extractor | wc -l)
-	path3=$(ls -la /home/kali/Desktop/forensic_case/bulk_extractor/*/ | wc -l)
-	path4=$(ls -la /home/kali/Desktop/forensic_case/bulk_extractor/*/*/ | wc -l)
-	path5=$(ls -la /home/kali/Desktop/forensic_case/foremost | wc -l)
-	path6=$(ls -la /home/kali/Desktop/forensic_case/foremost/*/ | wc -l)
-	path7=$(ls -la /home/kali/Desktop/forensic_case/strings | wc -l)
-	path8=$(ls -la /home/kali/Desktop/forensic_case/volatility | wc -l)
-	path9=$(ls -la /home/kali/Desktop/forensic_case | wc -l)
-
-	num=$((path1 + path2 + path3 + path4 + path5 + path6 + path7 + path8 + path9))
-	echo "[*] The number of files extracted is: $num" | tee -a "$LOG_FILE"
-
-	echo "------ Finished Volatility at $(date) ------" | tee -a "$LOG_FILE"
-	zip -r $HOME/forensic_case.zip $HOME/forensic_case > /dev/null 2>&1             # Zips all extracted files.
-	echo "------ Forensic_case directory has been zipped to forensic_case.zip ------"
+    num=$((path1 + path2 + path3 + path4 + path5 + path6 + path7 + path8 + path9))
+    echo "[*] Total number of files extracted: $num" | tee -a "$LOG_FILE"
 }
 
+# Begins the analysis process - Executes various forensic carvers and saves their output.
 function CARVERS() {
-	echo "------ Starting CARVERS at $(date) ------" | tee -a "$LOG_FILE"
+    echo -e "\n${BLUE}===== Running Carving Tools =====${NC}"
+    mkdir -p "$CASE_DIR"/{binwalk,bulk_extractor,foremost,strings}
 
-	# Executes various forensic carvers and saves their output.
-	binwalk $file -o $HOME/forensic_case/binwalk
-	bulk_extractor $file -o $HOME/forensic_case/bulk_extractor
-	foremost $file -o $HOME/forensic_case/foremost
-	
-	echo "[+] Checking for PCAP file...." | tee -a "$LOG_FILE"
-	ls $HOME/forensic_case/bulk_extractor | grep .pcap | tee -a "$LOG_FILE"
-	if [ "$?" == "1" ]; then
-		echo "Couldn't find a PCAP file..." | tee -a "$LOG_FILE"
-		exit
-	else
-		echo "PCAP file was found! Location: $HOME/forensic_case/bulk_extractor" | tee -a "$LOG_FILE"
-		echo "File size: $(sudo ls -la $HOME/forensic_case/bulk_extractor | grep .pcap | awk '{print $5}') bytes" | tee -a "$LOG_FILE"
-	fi
-	
-	# Extracts strings with specific keywords (e.g., passwords, usernames).
-	echo "Extracting human readable strings.." | tee -a "$LOG_FILE"
-	strings $file | grep -i password >> $HOME/forensic_case/strings/OUTPUTpass.txt | echo " [*] Strings password output is saved..." | tee -a "$LOG_FILE"
-	strings $file | grep -i username >> $HOME/forensic_case/strings/OUTPUTusename.txt | echo " [*] Strings usernames output is saved..." | tee -a "$LOG_FILE"
+    binwalk "$file" | tee "$CASE_DIR/binwalk/output.txt"
+    bulk_extractor "$file" -o "$CASE_DIR/bulk_extractor"
+    foremost "$file" -o "$CASE_DIR/foremost"
 
-	# Searches for EXE files and processes them if found.
-	ls $HOME/forensic_case/foremost/exe | grep .exe | tee -a "$LOG_FILE"
-	if [ "$?" == "1" ]; then
-		echo "Couldn't find an EXE file..." | tee -a "$LOG_FILE"
-		exit
-	else
-		sudo ls -la $HOME/forensic_case/foremost/exe | grep .exe | awk '{print $NF}' > $HOME/forensic_case/foremost/exe/exe_names.txt
+    echo -e "\n${YELLOW}[!] Looking for .pcap files...${NC}"
+    pcap_file=$(find "$CASE_DIR/bulk_extractor" -name "*.pcap" | head -n1)
+    if [[ -z "$pcap_file" ]]; then
+        echo -e "${YELLOW}[!] No PCAP file found.${NC}" | tee -a "$LOG_FILE"
+    else
+        echo -e "${GREEN}[✔] PCAP found: $pcap_file | Size: $(du -b "$pcap_file" | cut -f1) bytes${NC}" | tee -a "$LOG_FILE"
+    fi
 
-		for exefile in $(cat $HOME/forensic_case/foremost/exe/exe_names.txt); do
-			echo "EXE file was found! Location: $HOME/forensic_case/foremost/exe/$exefile" | tee -a "$LOG_FILE"
-		
-			file_size=$(sudo ls -la $HOME/forensic_case/foremost/exe/$exefile | awk '{print $5}')
-			echo "File size: $file_size bytes" | tee -a "$LOG_FILE"
+    echo -e "${GREEN}[✔] Extracting readable strings...${NC}"
+    strings "$file" | grep -i password > "$CASE_DIR/strings/OUTPUTpass.txt"
+    echo "[*] Strings with 'password' saved." | tee -a "$LOG_FILE"
+    strings "$file" | grep -i username > "$CASE_DIR/strings/OUTPUTuser.txt"
+    echo "[*] Strings with 'username' saved." | tee -a "$LOG_FILE"
 
-			strings $HOME/forensic_case/foremost/exe/$exefile > $HOME/forensic_case/strings/OUTPUT_$exefile.txt
-			echo " [*] Strings output on exe file saved to OUTPUT_$exefile.txt" | tee -a "$LOG_FILE"
-		done
-	fi
-	
-	VOLATILITY 
+    exe_path="$CASE_DIR/foremost/exe"
+    if [ -d "$exe_path" ]; then
+        find "$exe_path" -name "*.exe" > "$exe_path/exe_list.txt"
+        while read -r exefile; do
+            echo -e "${GREEN}[✔] Found EXE: $exefile${NC} | Size: $(du -b "$exefile" | cut -f1) bytes${NC}" | tee -a "$LOG_FILE"
+            strings "$exefile" > "$CASE_DIR/strings/OUTPUT_$(basename "$exefile").txt"
+        done < "$exe_path/exe_list.txt"
+    fi
+
+    VOLATILITY
 }
 
+# Downloads and extracts necessary tools if not already installed.
 function INSTALL() {
-	echo "------ Starting INSTALL at $(date) ------" >> "$LOG_FILE"
+    echo -e "\n${BLUE}===== Checking & Installing Tools =====${NC}"
+    for tool in binwalk bulk_extractor foremost; do
+        if ! command -v "$tool" &>/dev/null; then
+            echo -e "${YELLOW}[!] Installing missing tool: $tool${NC}"
+            sudo apt install -y "$tool"
+        else
+            echo -e "${GREEN}[✔] $tool is already installed${NC}"
+        fi
+    done
 
-	# Downloads and extracts necessary tools if not already installed.
-	
-	tools=("binwalk" "bulk_extractor" "foremost")
-	for tool in "${tools[@]}"; do
-		if which "$tool" > /dev/null; then
-			echo "$tool is already installed" | tee -a "$LOG_FILE"
-		else
-			echo "$tool is not installed, installing now..." >> "$LOG_FILE"
-			sudo apt install -y "$tool" >> "$LOG_FILE"
-			echo "$tool has been installed" >> "$LOG_FILE"
-		fi
-	done
-	
-	echo "------ Finished INSTALL at $(date) ------" >> "$LOG_FILE"
-	CARVERS 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VOL_PATH="$SCRIPT_DIR/vol/vol"
+
+if [[ ! -f "$VOL_PATH" ]]; then
+    echo -e "${YELLOW}[!] Volatility not found. Downloading...${NC}"
+    git clone https://github.com/EveRoy/File-Analyzer.git /tmp/vol-repo
+    cp -r /tmp/vol-repo/vol "$SCRIPT_DIR"
+    rm -rf /tmp/vol-repo
+
+    [[ -f "$VOL_PATH" ]] && echo -e "${GREEN}[✔] Volatility downloaded to: $VOL_PATH${NC}" \
+        || { echo -e "${RED}[✘] Failed to download Volatility. Check the GitHub repo.${NC}"; exit 1; }
+else
+    echo -e "${GREEN}[✔] Volatility already exists at: $VOL_PATH${NC}"
+fi
+
+    CARVERS
 }
 
+# START
 function START() {
-	echo "------ Starting START at $(date) ------" | tee -a "$LOG_FILE"
+    echo -e "${GREEN}[✔] File located. Starting analysis...${NC}"
+    INSTALL
+ # Zips all extracted files.
+    zip_name="forensic_case_$(basename "$file" | cut -d'.' -f1).zip"
+    zip -r "$HOME_DIR/$zip_name" "$CASE_DIR" > /dev/null
 
-	# Checks if the script is run as root for proper permissions.
-	user=$(whoami)
-	if [ "$user" == "root" ]; then
-		echo "You are root.. continuing.." | tee -a "$LOG_FILE"
-	# Prompts user to specify a file to analyze.
-	echo "Please enter a full path to the file you would like to investigate:"
-	read file
-	# Checking if the file exists.
-	if locate $file > /dev/null; then
-			echo "$file exists, continuing...."
-		else
-			echo "$file is not found...exiting..."
-			exit 
-	fi 
-	
-	echo "Creating a directory for the case..." | tee -a "$LOG_FILE"
-	mkdir $HOME/forensic_case/binwalk $HOME/forensic_case/bulk_extractor $HOME/forensic_case/foremost $HOME/forensic_case/volatility $HOME/forensic_case/strings > /dev/null 2>&1
-	
-	INSTALL 
-	else
-		echo "You are not root.. exiting..." | tee -a "$LOG_FILE"
-		exit
-	fi
-	
-	
-	echo "------ Finished at $(date) ------" | tee -a "$LOG_FILE"
+    echo -e "\n${BLUE}===== Summary Report =====${NC}"
+    echo -e "${GREEN}[✔] Analysis complete. Archive saved as: $zip_name${NC}"
+    echo -e "${GREEN}[✔] Log saved to: script_log.txt${NC}"
 }
 
-START   # Begins the analysis process
+START
